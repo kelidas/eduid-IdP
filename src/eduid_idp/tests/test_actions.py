@@ -130,9 +130,61 @@ class TestActions(MongoTestCase):
         # for some reason webtest doesn't set them in the request
         cookies = '; '.join(['{}={}'.format(k, v) for k, v
                              in self.http.cookies.items()])
-        resp = self.http.get(resp.location, headers={'Cookie': cookies})
+        from eduid_userdb.tou import ToUList
+        with patch.object(ToUList, 'has_accepted'):
+            ToUList.has_accepted.return_value = True
+            resp = self.http.get(resp.location, headers={'Cookie': cookies})
         self.assertEqual(resp.status, '200 Ok')
         self.assertIn('action="https://sp.example.edu/saml2/acs/"', resp.body)
+
+    def test_tou_actions(self):
+        try:
+            import eduid_action.tou
+        except ImportError:
+            self.skipTest('This test needs the ToU action plugin installed')
+
+        # Remove the standard test_action from the database
+        self.actions.remove_action_by_id(self.test_action.action_id)
+
+        # make the SAML authn request
+        req = make_SAML_request(eduid_idp.assurance.SWAMID_AL1)
+
+        # post the request to the test environment
+        resp = self.http.post('/sso/post', {'SAMLRequest': req})
+
+        # grab the login form from the response
+        form = resp.forms['login-form']
+
+        # fill in the form and post it to the test env
+        form['username'].value = 'johnsmith@example.com'
+        form['password'].value = '123456'
+
+        # Patch the VCCSClient so we do not need a vccs server
+        from vccs_client import VCCSClient
+        with patch.object(VCCSClient, 'authenticate'):
+            VCCSClient.authenticate.return_value = True
+
+            # post the login form to the test env
+            resp = form.submit()
+            self.assertEqual(resp.status, '302 Found')
+
+        # there are no pending actions
+        self.assertEquals(self.actions.db_count(), 0)
+
+        # get the redirect url. set the cookies manually,
+        # for some reason webtest doesn't set them in the request
+        cookies = '; '.join(['{}={}'.format(k, v) for k, v
+                             in self.http.cookies.items()])
+        resp = self.http.get(resp.location, headers={'Cookie': cookies})
+
+        # we have a dummy tou version, that has not been accepted.
+        self.assertEquals(self.config.tou_version, 'version1')
+        # An action is created in the actions db
+        self.assertEquals(self.actions.db_count(), 1)
+
+        # we get redirected to the actions app
+        self.assertEqual(resp.status, '302 Found')
+        self.assertIn(self.config.actions_app_uri, resp.location)
 
     def test_action(self):
 
